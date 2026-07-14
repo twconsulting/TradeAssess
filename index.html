@@ -253,22 +253,43 @@
     .app-header {
        display: flex;
        align-items: center;
-       gap: 12px;
-       margin-bottom: 24px;
-       padding-bottom: 12px;
+       gap: 16px;
+       margin-bottom: 28px;
+       padding-bottom: 16px;
        border-bottom: 1px solid hsl(var(--_border));
+       flex-wrap: wrap;
      }
+     
      .logo-img {
-       height: 40px;
+       height: 80px;
        width: auto;
+       max-width: 280px;
        display: block;
        flex-shrink: 0;
+       object-fit: contain;
      }
+     
      .header-title {
        font-size: 18px;
        font-weight: 700;
        color: hsl(var(--_foreground));
        letter-spacing: -0.01em;
+     }
+     
+     /* Optional: make logo even bigger on wide screens */
+     @media (min-width: 768px) {
+       .logo-img {
+         height: 100px;
+         max-width: 320px;
+       }
+     }
+     
+     /* On very small screens, reduce size to avoid crowding */
+     @media (max-width: 480px) {
+       .logo-img {
+         height: 60px;
+         max-width: 200px;
+       }
      }
 
     .wrap{
