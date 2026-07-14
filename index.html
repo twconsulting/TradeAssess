@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Trade Advantage Assessment — a free 7-question diagnostic from Trade Winds Consulting that scores your export readiness and recommends your next step.">
+<meta name="theme-color" content="#0B3A5C">
+<title>Trade Winds Consulting - Trade Advantage Assessment</title>
+<!-- Favicon is optional and safe to omit: an unresolved <link rel="icon">
+     just fails silently (no broken-image glyph in the page body), unlike
+     an in-page <img>. Point this at your real asset, or delete the line —
+     nothing else in this component depends on it. -->
+<link rel="icon" type="image/png" href="logo.png">
+</head>
+<body>
+
+<!--
+  USAGE
+  ─────
+  Drop this single file's contents wherever the assessment should appear —
+  as a Google Sites "Embed code" block, or pasted directly into a Next.js
+  page/component. The custom element below is self-contained: its styles
+  cannot leak into your page, and your page's styles cannot accidentally
+  break it. It is also safe to place more than once on the same page.
+
+  THEME INHERITANCE
+  ─────────────────
+  If the page this is embedded on already defines shadcn-style CSS
+  variables (--primary, --background, --border, etc.) on :root or <html>,
+  this component picks them up automatically — no code changes needed.
+  If those variables aren't present, it falls back to the navy/teal
+  placeholder theme used during design review.
+
+  Implementation note: this is done via a private-alias pattern
+  (--_primary: var(--primary, fallback)) rather than redeclaring the same
+  custom-property name inside its own fallback (--primary: var(--primary,
+  fallback)). The latter is a self-referencing / cyclic custom property,
+  which per spec resolves to the guaranteed-invalid value rather than the
+  fallback — it silently breaks theming instead of gracefully degrading.
+  Every rule below reads from the --_x alias, never from the raw --x name.
+
+  ANALYTICS (optional)
+  ─────────────────────
+  The component dispatches plain DOM CustomEvents you can listen for
+  anywhere on the page — no PII, no free-text answers included:
+    document.addEventListener('twa:started', e => {...});
+    document.addEventListener('twa:question_answered', e => {...});
+    document.addEventListener('twa:completed', e => {...});      // { score, band }
+    document.addEventListener('twa:cta_clicked', e => {...});    // { band, url }
+  Wire these into GA4 (gtag('event', ...)) or any analytics tool if useful.
+-->
+
+<trade-advantage-assessment></trade-advantage-assessment>
+
+<script>
+(function(){
+  'use strict';
+
+  // Guard against the script being included more than once on the same page.
+  if (customElements.get('trade-advantage-assessment')) return;
+
+  // ── Content / scoring configuration ───────────────────────────────────
+  // Kept as a single exported-looking config block so it's easy to find,
+  // version, and (later) swap for a calibrated model without touching
+  // render logic. SCORING_VERSION exists so that if you ever log scores
+  // externally, you can tell which model produced a given score.
+  const SCORING_VERSION = "1.0.1-heuristic";
+
+  const QUESTIONS = [
+    {
+      dim: "Export Experience",
+      text: "Have you shipped internationally before?",
+      opts: [
+        {label:"No, this will be our first shipment.", v:0},
+        {label:"Yes, occasionally — a handful of shipments so far.", v:2},
+        {label:"Yes, regularly — exporting/importing is ongoing.", v:4},
+      ]
+    },
+    {
+      dim: "Markets & Products",
+      text: "Do you have clearly identified target markets for your products?",
+      opts: [
+        {label:"No, we haven't defined target markets yet.", v:0},
+        {label:"We have a general idea, but it isn't backed by research.", v:2},
+        {label:"Yes, data-backed target markets are defined.", v:4},
+      ],
+      extra: [
+        {id:"products", label:"What products will you be exporting/importing? <span class='optional-tag'>(optional)</span>", placeholder:"e.g. cotton textiles, auto components"},
+        {id:"countries", label:"Which countries or regions are you targeting? <span class='optional-tag'>(optional)</span>", placeholder:"e.g. UAE, Germany, Southeast Asia"},
+      ]
+    },
+    {
+      dim: "HS Classification",
+      text: "How confident are you in your product's HS classification?",
+      opts: [
+        {label:"Not sure, it hasn't been formally classified.", v:0},
+        {label:"Self-classified, but never professionally verified.", v:2},
+        {label:"Professionally verified and documented.", v:4},
+      ]
+    },
+    {
+      dim: "Compliance Status",
+      text: "Where do you stand on core trade registrations (IEC, AD Code) and documentation?",
+      opts: [
+        {label:"Missing one or more key registrations.", v:0},
+        {label:"Registrations complete, but no ongoing compliance monitoring.", v:2},
+        {label:"Fully registered, with compliance actively monitored.", v:4},
+      ]
+    },
+    {
+      dim: "Buyer & Supplier Readiness",
+      text: "Do you have a confirmed buyer or supplier for your next shipment, or are you still sourcing one?",
+      opts: [
+        {label:"No confirmed buyer/supplier yet, still sourcing.", v:0},
+        {label:"In discussion, but nothing finalized.", v:2},
+        {label:"Confirmed and ready to proceed.", v:4},
+      ]
+    },
+    {
+      dim: "Shipment Timeline",
+      text: "What's your expected timeline for your next shipment?",
+      opts: [
+        {label:"Within the next 30 days.", v:0},
+        {label:"1–3 months out.", v:2},
+        {label:"More than 3 months out, or no shipment currently planned.", v:4},
+      ]
+    },
+    {
+      dim: "Duty & Cost Optimization",
+      text: "Have you assessed opportunities to reduce customs duty or landed cost?",
+      opts: [
+        {label:"Never assessed.", v:0},
+        {label:"Aware of the idea, but haven't acted on it.", v:2},
+        {label:"Actively optimizing landed cost and duty exposure.", v:4},
+      ]
+    },
+  ];
+
+  const RISK_MAP = {
+    0:{title:"No prior export execution", body:"Without shipment history, first-shipment risk (documentation errors, customs delay, unexpected cost) is highest. This is the most common cause of early-stage margin loss."},
+    1:{title:"No verified target markets", body:"Entering markets without market-specific research increases the odds of misjudged demand, regulatory surprises, or wrong-fit product positioning."},
+    2:{title:"Unverified HS classification", body:"An unverified or self-assigned HS code is one of the most common sources of duty overpayment and customs delay — worth professional verification before volume increases."},
+    3:{title:"Incomplete trade registrations", body:"Missing IEC or AD Code registration blocks legal export/import activity outright — this is a hard compliance gate, not a soft risk."},
+    4:{title:"No confirmed buyer or supplier", body:"Without a confirmed counterparty, timelines, pricing, and shipment planning all remain provisional — this is usually the real bottleneck behind a stalled first shipment."},
+    5:{title:"Tight timeline against unresolved gaps", body:"A shipment inside 30 days combined with open gaps elsewhere leaves very little room to fix issues before they become costly — this is worth prioritizing immediately."},
+    6:{title:"No duty or landed-cost optimization", body:"Without a landed cost assessment, margin erosion from avoidable duty exposure typically goes unnoticed until it's material."},
+  };
+
+  const OPP_MAP = {
+    0:{title:"Formalize a first-shipment process", body:"A structured first-shipment advisory removes the most common causes of early errors — this compounds into every shipment after it."},
+    1:{title:"Build a data-backed market shortlist", body:"Moving from instinct to a verified target-market list improves conversion and reduces wasted sourcing effort."},
+    2:{title:"Get professional HS classification", body:"A verified classification is both a compliance safeguard and, frequently, a direct duty-saving opportunity."},
+    3:{title:"Layer on compliance monitoring", body:"Registrations alone aren't enough in a changing regulatory environment — ongoing monitoring keeps you ahead of changes rather than reacting to them."},
+    4:{title:"Move buyer/supplier discussions to close", body:"You're in motion — formalizing terms now protects your timeline and pricing before the window narrows."},
+    5:{title:"Use the runway you have", body:"With more time before your next shipment, this is the ideal window to close classification, compliance, or market-research gaps before they become urgent."},
+    6:{title:"Formalize duty-saving practice", body:"Awareness without action leaves margin on the table — a landed cost assessment converts this into a measurable saving."},
+  };
+
+  function band(score){
+    if(score <= 40) return {
+      key:"early", tag:"Early Stage",
+      activeStages:[0,1,2], nextStage:3,
+      productName:"TradeLaunch",
+      body:"Your answers point to foundational gaps — market clarity, classification, buyer readiness, or registration — that are best solved together, in sequence, rather than one at a time. TradeLaunch is built for exactly this: a structured PLAN → PREPARE → COMPLY → LAUNCH program.",
+      btnLabel:"Start Your Export Journey",
+      btnUrl:"https://www.twconsulting.in/tradelaunch",
+      btnClass:"amber"
+    };
+    if(score <= 75) return {
+      key:"growing", tag:"Growing",
+      activeStages:[3,4], nextStage:4,
+      productName:"TradeIntel",
+      body:"You have export activity underway, but some of it is running on assumptions rather than ongoing intelligence — duty optimization, compliance monitoring, or market data. TradeIntel gives you continuous visibility across exactly these areas.",
+      btnLabel:"Explore Global Expansion Opportunities",
+      btnUrl:"https://tradeintel.twconsulting.in",
+      btnClass:"teal"
+    };
+    return {
+      key:"established", tag:"Established",
+      activeStages:[4,5], nextStage:5,
+      productName:"AEO Advisory",
+      body:"Your fundamentals are strong. The next lever isn't fixing gaps — it's status: Authorized Economic Operator recognition compounds your existing strength into faster clearance, lower friction, and enhanced credibility with regulators and partners.",
+      btnLabel:"Discuss Your AEO Readiness",
+      btnUrl:"https://tradewindsconsulting.zohobookings.in/#/227983000000036016",
+      btnClass:""
+    };
+  }
+
+  // Defensive: compute score from whatever answers exist, ignoring gaps
+  // rather than throwing, so a corrupted/partial state degrades gracefully.
+  function computeScore(answers){
+    let total = 0, max = 0;
+    QUESTIONS.forEach((q,i)=>{
+      max += 4;
+      const idx = answers[i];
+      if (typeof idx === 'number' && q.opts[idx]) total += q.opts[idx].v;
+    });
+    if (max === 0) return 0;
+    return Math.max(0, Math.min(100, Math.round((total/max)*100)));
+  }
+
+  function escapeHtml(s){
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  // ── CSS ──────────────────────────────────────────────────────────────
+  // Theme variables use the private-alias pattern: --_x: var(--x, fallback).
+  // Every rule below consumes --_x, never the raw --x name, so there is no
+  // self-reference / cyclic custom property anywhere in this stylesheet.
+  const STYLE = `
+    :host{
+      all: revert;
+      box-sizing:border-box;
+      display:block;
+      container-type: inline-size;
+      container-name: twa;
+      max-width:100%;
+      overflow-x:hidden;
+
+      --_background: var(--background, 0 0% 100%);
+      --_foreground: var(--foreground, 222 47% 11%);
+      --_card: var(--card, 0 0% 100%);
+      --_card-foreground: var(--card-foreground, 222 47% 11%);
+      --_primary: var(--primary, 205 79% 20%);
+      --_primary-foreground: var(--primary-foreground, 0 0% 100%);
+      --_secondary: var(--secondary, 164 82% 30%);
+      --_secondary-foreground: var(--secondary-foreground, 0 0% 100%);
+      --_accent: var(--accent, 24 89% 40%);
+      --_accent-foreground: var(--accent-foreground, 0 0% 100%);
+      --_muted: var(--muted, 210 29% 97%);
+      --_muted-foreground: var(--muted-foreground, 215 16% 35%);
+      --_border: var(--border, 215 27% 91%);
+      --_input: var(--input, 215 27% 91%);
+      --_ring: var(--ring, 205 79% 20%);
+      --_radius: var(--radius, 0.5rem);
+      --_secondary-soft: var(--secondary-soft, 164 60% 94%);
+      --_accent-soft: var(--accent-soft, 24 75% 94%);
+      --_shadow: 0 1px 2px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.06);
+
+      background:hsl(var(--_muted));
+      color:hsl(var(--_foreground));
+      font-family:'Lato',-apple-system,BlinkMacSystemFont,sans-serif;
+      -webkit-font-smoothing:antialiased;
+      -webkit-tap-highlight-color:transparent;
+      text-size-adjust:100%;
+      -webkit-text-size-adjust:100%;
+    }
+    *{box-sizing:border-box;}
+    button, input{font-family:inherit;}
+
+    .wrap{
+      width:100%;
+      max-width:720px;
+      margin:0 auto;
+      padding:clamp(20px,5vw,48px) clamp(16px,4vw,20px) clamp(32px,6vw,72px);
+    }
+
+    .brandline{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      font-size:13px;
+      font-weight:600;
+      letter-spacing:0.01em;
+      color:hsl(var(--_secondary));
+      margin-bottom:28px;
+      flex-wrap:wrap;
+    }
+    .brandline .dot{width:6px;height:6px;border-radius:50%;background:hsl(var(--_secondary));flex-shrink:0;}
+
+    h1{
+      font-size:clamp(1.5rem,5vw,34px);
+      font-weight:800;
+      line-height:1.18;
+      letter-spacing:-0.02em;
+      margin:0 0 14px;
+      color:hsl(var(--_foreground));
+      word-break:break-word;
+    }
+    h1 span{color:hsl(var(--_secondary));}
+
+    .sub{
+      font-size:clamp(14px,3vw,16px);
+      line-height:1.6;
+      color:hsl(var(--_muted-foreground));
+      max-width:34em;
+      margin:0 0 32px;
+      word-break:break-word;
+    }
+
+    .screen{display:none;}
+    .screen.active{display:block;animation:rise .4s ease both;}
+    @keyframes rise{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+    @media (prefers-reduced-motion: reduce){
+      .screen.active{animation:none;}
+    }
+
+    .btn{
+      font-family:'Lato',sans-serif;
+      font-weight:600;
+      font-size:15px;
+      background:hsl(var(--_primary));
+      color:hsl(var(--_primary-foreground));
+      border:none;
+      padding:14px 24px;
+      border-radius:calc(var(--_radius) - 2px);
+      cursor:pointer;
+      letter-spacing:.01em;
+      transition:background .15s ease, box-shadow .15s ease;
+      text-decoration:none;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:8px;
+      max-width:100%;
+      min-height:44px;
+      touch-action:manipulation;
+    }
+    .btn:hover{background:hsl(var(--_foreground));}
+    .btn:focus-visible{outline:none;box-shadow:0 0 0 3px hsl(var(--_background)), 0 0 0 5px hsl(var(--_ring));}
+    .btn.teal{background:hsl(var(--_secondary));}
+    .btn.teal:hover{background:hsl(var(--_secondary) / 0.85);}
+    .btn.amber{background:hsl(var(--_accent));}
+    .btn.amber:hover{background:hsl(var(--_accent) / 0.85);}
+    .btn.secondary{
+      background:hsl(var(--_card));
+      color:hsl(var(--_muted-foreground));
+      border:1px solid hsl(var(--_border));
+    }
+    .btn.secondary:hover{background:hsl(var(--_muted));border-color:hsl(var(--_primary));color:hsl(var(--_primary));}
+    .btn:disabled{opacity:.4;cursor:default;}
+
+    .meta-line{
+      font-size:12.5px;
+      color:hsl(var(--_muted-foreground) / 0.75);
+      margin-top:16px;
+      font-weight:500;
+    }
+
+    .stepper{display:flex;align-items:center;margin-bottom:32px;min-width:0;}
+    .stepper .node{
+      width:26px;height:26px;border-radius:50%;
+      background:hsl(var(--_card));border:1.5px solid hsl(var(--_border));
+      color:hsl(var(--_muted-foreground) / 0.75);
+      font-size:11px;font-weight:700;
+      display:flex;align-items:center;justify-content:center;
+      flex-shrink:0;transition:all .2s ease;
+    }
+    .stepper .node.done{background:hsl(var(--_secondary));border-color:hsl(var(--_secondary));color:hsl(var(--_primary-foreground));}
+    .stepper .node.current{background:hsl(var(--_primary));border-color:hsl(var(--_primary));color:hsl(var(--_primary-foreground));box-shadow:0 0 0 4px rgba(11,58,92,0.12);}
+    .stepper .seg{flex:1;min-width:4px;height:2px;background:hsl(var(--_border));}
+    .stepper .seg.done{background:hsl(var(--_secondary));}
+
+    .card{
+      background:hsl(var(--_card));
+      border:1px solid hsl(var(--_border));
+      border-radius:calc(var(--_radius) + 6px);
+      padding:clamp(14px,4vw,36px);
+      box-shadow:var(--_shadow);
+      min-width:0;
+    }
+    .q-dim{font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:hsl(var(--_secondary));margin-bottom:10px;}
+    .q-text{font-size:clamp(17px,4vw,21px);font-weight:700;line-height:1.35;letter-spacing:-0.01em;margin-bottom:24px;color:hsl(var(--_foreground));word-break:break-word;}
+    .options{display:flex;flex-direction:column;gap:9px;min-width:0;}
+    .opt{
+      display:flex;width:100%;align-items:flex-start;gap:13px;
+      padding:14px 16px;border:1.5px solid hsl(var(--_border));
+      border-radius:var(--_radius);cursor:pointer;background:hsl(var(--_card));
+      transition:border-color .12s ease, background .12s ease;
+      font-family:inherit;text-align:left;min-height:44px;touch-action:manipulation;
+    }
+    .opt:hover{border-color:hsl(var(--_primary));background:hsl(var(--_muted));}
+    .opt:focus-visible{outline:none;box-shadow:0 0 0 3px hsl(var(--_background)), 0 0 0 5px hsl(var(--_ring));}
+    .opt.selected{border-color:hsl(var(--_primary));background:hsl(var(--_primary) / 0.06);}
+    .opt .mark{
+      width:17px;height:17px;border-radius:50%;
+      border:1.5px solid hsl(var(--_muted-foreground) / 0.75);
+      flex-shrink:0;margin-top:1px;position:relative;
+    }
+    .opt.selected .mark{border-color:hsl(var(--_primary));}
+    .opt.selected .mark::after{content:'';position:absolute;inset:3px;border-radius:50%;background:hsl(var(--_primary));}
+    .opt-text{font-size:14.5px;line-height:1.45;color:hsl(var(--_foreground));word-break:break-word;}
+
+    .extra-fields{margin-top:18px;padding-top:18px;border-top:1px dashed hsl(var(--_border));}
+    .extra-fields label{display:block;font-size:12.5px;font-weight:600;color:hsl(var(--_muted-foreground));margin-bottom:6px;}
+    .extra-fields .fld{margin-bottom:14px;}
+    .extra-fields input{
+      width:100%;font-size:16px;padding:11px 13px;
+      border:1.5px solid hsl(var(--_border));border-radius:calc(var(--_radius) - 2px);
+      color:hsl(var(--_foreground));outline:none;
+      transition:border-color .12s ease, box-shadow .12s ease;min-height:44px;
+      max-width:100%;
+    }
+    .extra-fields input:focus{border-color:hsl(var(--_primary));}
+    .extra-fields input:focus-visible{box-shadow:0 0 0 3px hsl(var(--_ring) / 0.15);}
+    .optional-tag{font-weight:400;color:hsl(var(--_muted-foreground) / 0.75);font-size:11.5px;}
+
+    .nav-row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:28px;}
+    .link-back{
+      font-size:13px;font-weight:600;color:hsl(var(--_muted-foreground) / 0.75);
+      background:none;border:none;cursor:pointer;padding:10px 4px;min-height:44px;font-family:inherit;
+    }
+    .link-back:hover{color:hsl(var(--_primary));}
+    .link-back:disabled{opacity:0.3;cursor:default;}
+    .link-back:focus-visible{outline:none;box-shadow:0 0 0 3px hsl(var(--_ring) / 0.15);border-radius:4px;}
+
+    .score-block{
+      background:hsl(var(--_card));border:1px solid hsl(var(--_border));
+      border-radius:calc(var(--_radius) + 6px);box-shadow:var(--_shadow);
+      padding:clamp(16px,4vw,36px);text-align:center;margin-bottom:8px;
+    }
+    .gauge-wrap{position:relative;width:min(180px,50vw);height:min(180px,50vw);margin:0 auto 4px;overflow:hidden;}
+    .gauge-wrap svg{width:100%;height:100%;display:block;}
+    .score-num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;padding:0 5%;}
+    .score-num .n{font-size:clamp(28px,7vw,44px);font-weight:800;color:hsl(var(--_foreground));line-height:1;}
+    .score-num .lbl{font-size:clamp(8px,1.6vw,10.5px);font-weight:700;letter-spacing:0.06em;text-transform:capitalize;color:hsl(var(--_muted-foreground) / 0.75);margin-top:6px;max-width:90%;overflow:hidden;text-overflow:ellipsis;}
+    .band-tag{display:inline-block;font-size:12.5px;font-weight:700;letter-spacing:0.03em;padding:6px 16px;border-radius:20px;margin-top:6px;}
+    .band-tag.early{background:hsl(var(--_accent-soft));color:hsl(var(--_accent));}
+    .band-tag.growing{background:hsl(var(--_secondary-soft));color:hsl(var(--_secondary));}
+    .band-tag.established{background:hsl(var(--_primary) / 0.1);color:hsl(var(--_primary));}
+
+    .personal-line{font-size:13.5px;color:hsl(var(--_muted-foreground));margin-top:14px;padding-top:14px;border-top:1px solid hsl(var(--_border));word-break:break-word;}
+    .personal-line b{color:hsl(var(--_foreground));}
+
+    .sec-title{font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:hsl(var(--_muted-foreground) / 0.75);margin:36px 0 14px;}
+
+    .risk-item, .opp-item{
+      background:hsl(var(--_card));border:1px solid hsl(var(--_border));
+      border-radius:calc(var(--_radius) + 3px);padding:16px 18px;margin-bottom:9px;
+      display:flex;gap:13px;align-items:flex-start;box-shadow:var(--_shadow);
+      min-width:0;
+    }
+    .risk-item .flag, .opp-item .flag{
+      width:26px;height:26px;border-radius:7px;flex-shrink:0;
+      display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
+    }
+    .risk-item .flag{background:hsl(var(--_accent-soft));color:hsl(var(--_accent));}
+    .opp-item .flag{background:hsl(var(--_secondary-soft));color:hsl(var(--_secondary));}
+    .item-title{font-weight:700;font-size:14.5px;margin-bottom:3px;color:hsl(var(--_foreground));}
+    .item-body{font-size:13.5px;line-height:1.5;color:hsl(var(--_muted-foreground));}
+
+    .roadmap{background:hsl(var(--_card));border:1px solid hsl(var(--_border));border-radius:calc(var(--_radius) + 6px);padding:28px 20px 22px;box-shadow:var(--_shadow);min-width:0;}
+    .stage-row{display:flex;position:relative;gap:6px;padding-bottom:8px;}
+    .stage-row .connector{position:absolute;top:13px;left:6%;right:6%;height:2px;background:hsl(var(--_border));z-index:0;}
+    .stage{flex:1;min-width:0;text-align:center;position:relative;z-index:1;}
+    .stage .dot{width:12px;height:12px;border-radius:50%;background:hsl(var(--_card));border:2px solid hsl(var(--_border));margin:0 auto 10px;}
+    .stage.active .dot{background:hsl(var(--_primary));border-color:hsl(var(--_primary));box-shadow:0 0 0 4px rgba(11,58,92,0.12);}
+    .stage.next .dot{background:hsl(var(--_secondary));border-color:hsl(var(--_secondary));}
+    .stage-name{font-size:9.5px;font-weight:700;letter-spacing:0.05em;color:hsl(var(--_muted-foreground) / 0.75);word-break:break-word;}
+    .stage.active .stage-name{color:hsl(var(--_primary));}
+    .stage.next .stage-name{color:hsl(var(--_secondary));}
+
+    .recommend{margin-top:36px;border:1.5px solid hsl(var(--_primary));border-radius:calc(var(--_radius) + 6px);padding:clamp(16px,4vw,32px);background:hsl(var(--_muted) / 0.6);}
+    .recommend .k{font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:hsl(var(--_secondary));}
+    .recommend h3{font-size:clamp(19px,5vw,24px);font-weight:800;margin:8px 0 10px;color:hsl(var(--_foreground));letter-spacing:-0.01em;}
+    .recommend p{font-size:14.5px;line-height:1.6;color:hsl(var(--_muted-foreground));margin:0 0 22px;}
+    .recommend .actions{display:flex;gap:10px;flex-wrap:wrap;}
+
+    footer.tw{margin-top:48px;text-align:center;font-size:12px;font-weight:500;color:hsl(var(--_muted-foreground) / 0.75);}
+
+    /* Container queries react to the widget's own rendered width, not just
+       the viewport — correct behavior even inside a narrow embed column on
+       an otherwise-wide page. @media rules are kept underneath as a
+       fallback for browsers without container query support; values are
+       identical so the overlap in supporting browsers is harmless. */
+    @media (max-width:768px), (max-width:768px) and (min-width:1px){
+      .stepper{overflow-x:auto;padding-bottom:8px;}
+      .nav-row{flex-direction:column-reverse;align-items:stretch;}
+      .nav-row .btn, .nav-row .link-back{width:100%;text-align:center;justify-content:center;}
+      .recommend .actions{flex-direction:column;}
+      .recommend .actions .btn{width:100%;}
+      .risk-item, .opp-item{padding:14px;}
+      .brandline{flex-wrap:wrap;}
+    }
+    @media (max-width:480px){
+      .options{gap:8px;}
+      .opt{padding:12px;}
+      .opt-text{font-size:14px;}
+      .stage-name{font-size:8px;}
+      footer.tw{font-size:11px;}
+    }
+    /* Extra-narrow refinement (ported from the DeepSeek build): tightens
+       the stepper and stage row further for very small embed widths. */
+    @media (max-width:360px){
+      .stage-name{font-size:6.5px;letter-spacing:0.02em;}
+      .stage .dot{width:8px;height:8px;margin-bottom:6px;}
+      .stage-row .connector{top:9px;}
+      .stepper .node{width:20px;height:20px;font-size:9.5px;}
+      .btn{font-size:13.5px;padding:12px 16px;}
+    }
+    @container twa (max-width:768px){
+      .stepper{overflow-x:auto;padding-bottom:8px;}
+      .nav-row{flex-direction:column-reverse;align-items:stretch;}
+      .nav-row .btn, .nav-row .link-back{width:100%;text-align:center;justify-content:center;}
+      .recommend .actions{flex-direction:column;}
+      .recommend .actions .btn{width:100%;}
+      .risk-item, .opp-item{padding:14px;}
+      .brandline{flex-wrap:wrap;}
+    }
+    @container twa (max-width:480px){
+      .options{gap:8px;}
+      .opt{padding:12px;}
+      .opt-text{font-size:14px;}
+      .stage-name{font-size:8px;}
+      footer.tw{font-size:11px;}
+    }
+    @container twa (max-width:360px){
+      .stage-name{font-size:6.5px;letter-spacing:0.02em;}
+      .stage .dot{width:8px;height:8px;margin-bottom:6px;}
+      .stage-row .connector{top:9px;}
+      .stepper .node{width:20px;height:20px;font-size:9.5px;}
+      .btn{font-size:13.5px;padding:12px 16px;}
+    }
+  `;
+
+  // ── Font loading (document-level; @font-face isn't shadow-scoped) ─────
+  function injectFontsOnce(){
+    if (document.getElementById('twa-font-link')) return;
+    const pre1 = document.createElement('link');
+    pre1.rel = 'preconnect'; pre1.href = 'https://fonts.googleapis.com';
+    const pre2 = document.createElement('link');
+    pre2.rel = 'preconnect'; pre2.href = 'https://fonts.gstatic.com'; pre2.crossOrigin = 'anonymous';
+    const sheet = document.createElement('link');
+    sheet.id = 'twa-font-link'; sheet.rel = 'stylesheet';
+    sheet.href = 'https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap';
+    document.head.append(pre1, pre2, sheet);
+  }
+
+  class TradeAdvantageAssessment extends HTMLElement {
+    constructor(){
+      super();
+      this.attachShadow({ mode: 'open' });
+      this.answers = new Array(QUESTIONS.length).fill(null);
+      this.extras = { products:"", countries:"" };
+      this.current = 0;
+    }
+
+    connectedCallback(){
+      injectFontsOnce();
+      this.shadowRoot.innerHTML = `
+        <style>${STYLE}</style>
+        <div class="wrap">
+          <div class="screen active" id="start">
+            <div class="brandline"><span class="dot"></span>Trade Advantage Assessment</div>
+            <h1>Where's your <span>Trade Advantage</span>, today?</h1>
+            <p class="sub">
+              Seven questions on your markets, products, readiness, and compliance.
+              You'll get a Trade Advantage Score, your specific risk exposure, and a
+              roadmap built from your answers — plus a clear next step for reaching
+              your global growth goals.
+            </p>
+            <button type="button" class="btn" id="beginBtn">Begin Assessment</button>
+            <div class="meta-line">7 Questions · ~3 Minutes · Free</div>
+          </div>
+          <div id="q-container" aria-live="polite"></div>
+          <div class="screen" id="results" aria-live="polite"></div>
+          <footer class="tw">Trade Winds Consulting - Trade Advantage Assessment</footer>
+        </div>
+      `;
+
+      this.$start = this.shadowRoot.getElementById('start');
+      this.$q = this.shadowRoot.getElementById('q-container');
+      this.$results = this.shadowRoot.getElementById('results');
+
+      this.shadowRoot.getElementById('beginBtn').addEventListener('click', () => this.goTo(1));
+
+      this.$q.addEventListener('click', (e) => {
+        const optBtn = e.target.closest('.opt');
+        if (optBtn){
+          const oi = Number(optBtn.dataset.oi);
+          this.answers[this.current] = oi;
+          this.emit('question_answered', {
+            index: this.current,
+            dimension: QUESTIONS[this.current].dim,
+            value: QUESTIONS[this.current].opts[oi].v
+          });
+          this.renderQuestion(this.current);
+          return;
+        }
+        const actionBtn = e.target.closest('[data-action]');
+        if (actionBtn){
+          if (actionBtn.dataset.action === 'next') this.nextQ();
+          if (actionBtn.dataset.action === 'prev') this.prevQ();
+        }
+      });
+
+      this.$q.addEventListener('input', (e) => {
+        const field = e.target.closest('[data-field]');
+        if (field) this.extras[field.dataset.field] = field.value;
+      });
+
+      this.$results.addEventListener('click', (e) => {
+        const restartBtn = e.target.closest('[data-action="restart"]');
+        if (restartBtn){ this.restart(); return; }
+        const cta = e.target.closest('a.btn');
+        if (cta){
+          this.emit('cta_clicked', { band: this._lastBand, url: cta.getAttribute('href') });
+        }
+      });
+    }
+
+    emit(name, detail){
+      // composed:true lets listeners outside the shadow root hear this.
+      this.dispatchEvent(new CustomEvent(`twa:${name}`, {
+        detail: Object.assign({ scoringVersion: SCORING_VERSION }, detail || {}),
+        bubbles: true,
+        composed: true
+      }));
+    }
+
+    buildStepper(idx){
+      let html = `<div class="stepper" role="progressbar" aria-valuemin="1" aria-valuemax="${QUESTIONS.length}" aria-valuenow="${idx+1}" aria-label="Question ${idx+1} of ${QUESTIONS.length}">`;
+      QUESTIONS.forEach((_,i)=>{
+        const cls = i < idx ? 'done' : (i === idx ? 'current' : '');
+        html += `<div class="node ${cls}" aria-hidden="true">${i < idx ? '✓' : i+1}</div>`;
+        if (i < QUESTIONS.length-1) html += `<div class="seg ${i < idx ? 'done':''}" aria-hidden="true"></div>`;
+      });
+      return html + '</div>';
+    }
+
+    renderQuestion(i){
+      const q = QUESTIONS[i];
+      let optsHtml = '';
+      q.opts.forEach((o, oi) => {
+        const sel = this.answers[i] === oi;
+        optsHtml += `<button type="button" class="opt ${sel?'selected':''}" data-oi="${oi}" role="radio" aria-checked="${sel}">
+          <span class="mark" aria-hidden="true"></span><span class="opt-text">${escapeHtml(o.label)}</span>
+        </button>`;
+      });
+
+      let extraHtml = '';
+      if (q.extra){
+        extraHtml = '<div class="extra-fields">';
+        q.extra.forEach(f => {
+          extraHtml += `<div class="fld">
+            <label for="fld-${f.id}">${f.label}</label>
+            <input type="text" id="fld-${f.id}" data-field="${f.id}" placeholder="${escapeHtml(f.placeholder)}" value="${escapeHtml(this.extras[f.id]||'')}" autocomplete="off">
+          </div>`;
+        });
+        extraHtml += '</div>';
+      }
+
+      this.$q.innerHTML = `
+        <div class="screen active">
+          ${this.buildStepper(i)}
+          <div class="card">
+            <div class="q-dim">Question ${i+1} of ${QUESTIONS.length} · ${escapeHtml(q.dim)}</div>
+            <div class="q-text">${escapeHtml(q.text)}</div>
+            <div class="options" role="radiogroup" aria-label="${escapeHtml(q.text)}">${optsHtml}</div>
+            ${extraHtml}
+            <div class="nav-row">
+              <button type="button" class="link-back" ${i===0?'disabled':''} data-action="prev">← Back</button>
+              <button type="button" class="btn" data-action="next" ${this.answers[i]===null?'disabled':''}>
+                ${i === QUESTIONS.length-1 ? 'See My Results' : 'Next'}
+              </button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    nextQ(){
+      if (this.answers[this.current] === null) return;
+      if (this.current < QUESTIONS.length - 1){
+        this.current++;
+        this.renderQuestion(this.current);
+      } else {
+        this.showResults();
+      }
+    }
+
+    prevQ(){
+      if (this.current > 0){
+        this.current--;
+        this.renderQuestion(this.current);
+      } else {
+        this.goTo(0);
+      }
+    }
+
+    goTo(step){
+      this.$start.classList.remove('active');
+      this.$q.innerHTML = '';
+      this.$results.classList.remove('active');
+      if (step === 1){
+        this.current = 0;
+        this.emit('started', {});
+        this.renderQuestion(0);
+      } else {
+        this.$start.classList.add('active');
+      }
+    }
+
+    showResults(){
+      this.$q.innerHTML = '';
+      const score = computeScore(this.answers);
+      const b = band(score);
+      this._lastBand = b.key;
+      const circumference = 2 * Math.PI * 78;
+      const offset = circumference - (score/100)*circumference;
+
+      let risksHtml = '', oppsHtml = '';
+      this.answers.forEach((a,i) => {
+        const opt = QUESTIONS[i].opts[a];
+        if (!opt) return;
+        const val = opt.v;
+        if (val === 0 && RISK_MAP[i]){
+          risksHtml += `<div class="risk-item"><div class="flag" aria-hidden="true">!</div><div><div class="item-title">${escapeHtml(RISK_MAP[i].title)}</div><div class="item-body">${escapeHtml(RISK_MAP[i].body)}</div></div></div>`;
+        } else if (val === 2 && OPP_MAP[i]){
+          oppsHtml += `<div class="opp-item"><div class="flag" aria-hidden="true">↑</div><div><div class="item-title">${escapeHtml(OPP_MAP[i].title)}</div><div class="item-body">${escapeHtml(OPP_MAP[i].body)}</div></div></div>`;
+        }
+      });
+      if (!risksHtml) risksHtml = `<div class="risk-item"><div class="flag" style="background:hsl(var(--_secondary-soft));color:hsl(var(--_secondary));" aria-hidden="true">✓</div><div><div class="item-title">No critical risk flags</div><div class="item-body">Your fundamentals are in place across the dimensions we assess — the priority now is optimization, not repair.</div></div></div>`;
+      if (!oppsHtml) oppsHtml = `<div class="opp-item"><div class="flag" aria-hidden="true">✓</div><div><div class="item-title">Maintain and monitor</div><div class="item-body">No mid-tier gaps flagged — focus on sustaining current practice and monitoring for regulatory change.</div></div></div>`;
+
+      const stageNames = ["ACCESS","DESIGN","ENABLE","EXECUTE","OPTIMIZE","ELEVATE"];
+      let stagesHtml = '<div class="stage-row"><div class="connector" aria-hidden="true"></div>';
+      stageNames.forEach((name,i) => {
+        let cls = '';
+        if (b.activeStages.includes(i)) cls = 'active';
+        if (i === b.nextStage) cls = 'next';
+        stagesHtml += `<div class="stage ${cls}"><div class="dot" aria-hidden="true"></div><div class="stage-name">${name}</div></div>`;
+      });
+      stagesHtml += '</div>';
+
+      let personalLine = '';
+      if (this.extras.products || this.extras.countries){
+        let phrase = '';
+        if (this.extras.products && this.extras.countries){
+          phrase = `for <b>${escapeHtml(this.extras.products)}</b> into <b>${escapeHtml(this.extras.countries)}</b>`;
+        } else if (this.extras.products){
+          phrase = `for <b>${escapeHtml(this.extras.products)}</b>`;
+        } else {
+          phrase = `into <b>${escapeHtml(this.extras.countries)}</b>`;
+        }
+        personalLine = `<div class="personal-line">This assessment reflects your plans ${phrase}.</div>`;
+      }
+
+      this.$results.innerHTML = `
+        <div class="brandline"><span class="dot"></span>Assessment Complete</div>
+        <div class="score-block">
+          <div class="gauge-wrap">
+            <svg viewBox="0 0 180 180" role="img" aria-label="Trade Advantage Score: ${score} out of 100">
+              <circle cx="90" cy="90" r="78" fill="none" stroke="hsl(var(--_border))" stroke-width="10"/>
+              <circle cx="90" cy="90" r="78" fill="none" stroke="hsl(var(--_primary))" stroke-width="10"
+                stroke-linecap="round" stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"
+                transform="rotate(-90 90 90)" />
+            </svg>
+            <div class="score-num" aria-hidden="true"><div class="n">${score}</div><div class="lbl">Trade Advantage Score</div></div>
+          </div>
+          <div class="band-tag ${b.key}">${b.tag}</div>
+          ${personalLine}
+        </div>
+        <div class="sec-title">Top Risks</div>
+        ${risksHtml}
+        <div class="sec-title">Growth Opportunities</div>
+        ${oppsHtml}
+        <div class="sec-title">Your Position on the Trade Advantage System</div>
+        <div class="roadmap">${stagesHtml}</div>
+        <div class="recommend">
+          <div class="k">Recommended Next Step</div>
+          <h3>${escapeHtml(b.productName)}</h3>
+          <p>${escapeHtml(b.body)}</p>
+          <div class="actions">
+            <a class="btn ${b.btnClass}" href="${b.btnUrl}" target="_blank" rel="noopener noreferrer">${escapeHtml(b.btnLabel)}</a>
+            <button type="button" class="btn secondary" data-action="restart">Retake Assessment</button>
+          </div>
+        </div>
+      `;
+      this.$results.classList.add('active');
+      this.$results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      this.emit('completed', { score, band: b.key });
+    }
+
+    restart(){
+      this.answers = new Array(QUESTIONS.length).fill(null);
+      this.extras = { products:"", countries:"" };
+      this.current = 0;
+      this.$results.classList.remove('active');
+      this.goTo(0);
+    }
+  }
+
+  try {
+    customElements.define('trade-advantage-assessment', TradeAdvantageAssessment);
+  } catch (err) {
+    console.error('Trade Advantage Assessment failed to register:', err);
+  }
+})();
+</script>
+</body>
+</html>
