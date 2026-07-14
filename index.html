@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="Trade Advantage Assessment — a free 7-question diagnostic from Trade Winds Consulting that scores your export readiness and recommends your next step.">
 <meta name="theme-color" content="#0B3A5C">
-<title>Trade Winds Consulting - Trade Advantage Assessment</title>
+<title>Trade Winds Consulting - TradeAssess</title>
 <!-- Favicon is optional and safe to omit: an unresolved <link rel="icon">
      just fails silently (no broken-image glyph in the page body), unlike
      an in-page <img>. Point this at your real asset, or delete the line —
@@ -100,7 +100,7 @@
     },
     {
       dim: "Compliance Status",
-      text: "Where do you stand on core trade registrations (IEC, AD Code) and documentation?",
+      text: "Where do you stand on core trade registrations and documentation?",
       opts: [
         {label:"Missing one or more key registrations.", v:0},
         {label:"Registrations complete, but no ongoing compliance monitoring.", v:2},
@@ -249,6 +249,27 @@
     }
     *{box-sizing:border-box;}
     button, input{font-family:inherit;}
+
+    .app-header {
+       display: flex;
+       align-items: center;
+       gap: 12px;
+       margin-bottom: 24px;
+       padding-bottom: 12px;
+       border-bottom: 1px solid hsl(var(--_border));
+     }
+     .logo-img {
+       height: 40px;
+       width: auto;
+       display: block;
+       flex-shrink: 0;
+     }
+     .header-title {
+       font-size: 18px;
+       font-weight: 700;
+       color: hsl(var(--_foreground));
+       letter-spacing: -0.01em;
+     }
 
     .wrap{
       width:100%;
@@ -542,8 +563,11 @@
       this.shadowRoot.innerHTML = `
         <style>${STYLE}</style>
         <div class="wrap">
+          <div class="app-header">
+            <img src="logo.png" alt="Trade Winds Consulting" class="logo-img" />
+            <span class="header-title">Trade Advantage Assessment</span>
+          </div>
           <div class="screen active" id="start">
-            <div class="brandline"><span class="dot"></span>Trade Advantage Assessment</div>
             <h1>Where's your <span>Trade Advantage</span>, today?</h1>
             <p class="sub">
               Seven questions on your markets, products, readiness, and compliance.
