@@ -587,7 +587,67 @@
     .stage.active .stage-name{color:hsl(var(--_primary));}
     .stage.next .stage-name{color:hsl(var(--_secondary));}
  
-    footer.tw{margin-top:48px;text-align:center;font-size:12px;font-weight:500;color:hsl(var(--_muted-foreground) / 0.75);}
+    footer.tw {
+      margin-top: 48px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 500;
+      color: hsl(var(--_muted-foreground) / 0.75);
+    }
+     
+    footer.tw a {
+      color: inherit;
+      text-decoration: none;
+      transition: color 0.2s ease;
+    }
+     
+    footer.tw a:hover {
+      color: #2563eb; /* Change to your preferred hover color */
+    }
+     
+    @media (max-width:480px) {
+      .options {
+        gap:8px;
+      }
+     
+      .opt {
+        padding:12px;
+      }
+     
+      .opt-text {
+        font-size:14px;
+      }
+     
+      .stage-name {
+        font-size:8px;
+      }
+     
+      footer.tw {
+        font-size:11px;
+      }
+    }
+     
+    @container twa (max-width:480px) {
+      .options {
+        gap:8px;
+      }
+     
+      .opt {
+        padding:12px;
+      }
+     
+      .opt-text {
+        font-size:14px;
+      }
+     
+      .stage-name {
+        font-size:8px;
+      }
+     
+      footer.tw {
+        font-size:11px;
+      }
+    }
  
     /* Container queries react to the widget's own rendered width, not just
        the viewport — correct behavior even inside a narrow embed column on
@@ -691,8 +751,9 @@
           <div class="screen" id="results" aria-live="polite"></div>
           <footer class="tw">
             <a href="https://www.twconsulting.in" target="_blank" rel="noopener noreferrer">
-              Trade Winds Consulting - TradeAssess
+              Trade Winds Consulting
             </a>
+            - TradeAssess
           </footer>
         </div>
       `;
